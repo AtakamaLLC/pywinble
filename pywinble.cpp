@@ -3,8 +3,14 @@
 #pragma comment(lib, "windowsapp")
 
 #include <Python.h>
+#include "pybind11/pybind11.h"
+#include "pybind11/stl.h"
 
+namespace py = pybind11;
+
+#include <memory>
 #include <iostream>
+
 #include <atlbase.h>
 
 #include "winrt/Windows.Foundation.h"
@@ -88,7 +94,7 @@ PyObject *PyVar(const winrt::hstring &var) {
     #define PyUnicode_AsUTF8 PyString_AsString
 #endif
 
-#define Py_RETURN_ERROR(type, msg) { PyErr_SetString(type, msg); return NULL; }
+#define Py_RETURN_ERROR(type, msg) { PyErr_SetString(type, msg); throw pybind11::error_already_set(); }
 
 PyObject *PyVar(const std::string &var) {
     return PyUnicode_FromString(var.c_str());
@@ -119,7 +125,7 @@ static PyObject* on_adstatus_callback = NULL;
 
 void call_on_adstatus_callback(const Advertisement::BluetoothLEAdvertisementPublisher &pub, const Advertisement::BluetoothLEAdvertisementPublisherStatusChangedEventArgs &status) {
     if (on_adstatus_callback) {
-        gil_lock lock;
+        py::gil_scoped_acquire acquire;
         int err = (int) status.Error();
         int stat = (int) status.Status();
         PyObject *result = PyObject_CallFunction(on_adstatus_callback, "ii", (int)status.Error(), (int)status.Status());
@@ -127,25 +133,29 @@ void call_on_adstatus_callback(const Advertisement::BluetoothLEAdvertisementPubl
     }
 }
 
-static PyObject* pywinble_info(PyObject *self, PyObject *args) {
+py::dict pywinble_info() {
+    USES_CONVERSION;
+
     if (!bluetooth_adapter) {
         bluetooth_adapter = BluetoothAdapter::GetDefaultAsync().get();
         if (!bluetooth_adapter)
-            Py_RETURN_ERROR(PyExc_RuntimeError, "Adapter discovery error");
+            throw std::exception("Adapter discovery error");
     }
 
-    #define ADD_DICT(dict, key, var) PyDict_SetItemString(dict, key, PyVar(var))
-    #define ADD_DICT_O(dict, ob, var) PyDict_SetItemString(dict, #var, PyVar(ob.var()))
 
-    PyObject *dict = PyDict_New();
+    py::dict dict;
 
-    ADD_DICT_O(dict, bluetooth_adapter, IsLowEnergySupported);
-    ADD_DICT_O(dict, bluetooth_adapter, IsClassicSupported);
-    ADD_DICT_O(dict, bluetooth_adapter, IsPeripheralRoleSupported);
-    ADD_DICT_O(dict, bluetooth_adapter, IsAdvertisementOffloadSupported);
-    ADD_DICT_O(dict, bluetooth_adapter, DeviceId);
-    ADD_DICT(dict, "BluetoothAddress", hexlify(bluetooth_adapter.BluetoothAddress(), true));
-    ADD_DICT_O(dict, bluetooth_adapter, AreLowEnergySecureConnectionsSupported);
+    #define ADD_DICT(key, var) dict[key]=var
+    #define ADD_DICT_O(ob, var) dict[#var]=ob.var()
+
+    ADD_DICT("BluetoothAddress", hexlify(bluetooth_adapter.BluetoothAddress(), true));
+    ADD_DICT("DeviceId", W2A(bluetooth_adapter.DeviceId().c_str()));
+
+    ADD_DICT_O(bluetooth_adapter, IsLowEnergySupported);
+    ADD_DICT_O(bluetooth_adapter, IsClassicSupported);
+    ADD_DICT_O(bluetooth_adapter, IsPeripheralRoleSupported);
+    ADD_DICT_O(bluetooth_adapter, IsAdvertisementOffloadSupported);
+    ADD_DICT_O(bluetooth_adapter, AreLowEnergySecureConnectionsSupported);
 
     return dict;
 }
@@ -201,60 +211,92 @@ static PyObject* pywinble_advertise(PyObject *self, PyObject *args, PyObject *kw
     Py_RETURN_NONE;
 }
 
+class BLEProvider {
+    public:
+        GattServiceProvider provider;
 
-static PyObject* pywinble_provide(PyObject *self, PyObject *args, PyObject *kws) {
-    static char *kwlist[] = {"uuid" , "characteristics", NULL};
-    const char *uuid_str;
-    PyObject *chardict;
+        BLEProvider(GattServiceProvider ref) : provider(ref) {
+            if (!provider) 
+                throw std::exception("empty provider error");
+        }
 
-    if (!PyArg_ParseTupleAndKeywords(args, kws, "sO!", kwlist, &uuid_str, &PyDict_Type, &chardict))
-        return NULL;
-   
+        ~BLEProvider() {
+            provider.StopAdvertising();
+        }
+
+        wstring getUUID() {
+            wstring out;
+            auto uuid = provider.Service().Uuid();
+            out.resize(64);
+            int len = StringFromGUID2(uuid, &out[0], (int) out.size());
+            out.resize(len);
+            return out;
+        }
+
+        GattLocalService Service() {
+            return provider.Service();
+        }
+
+        void StartAdvertising() {
+            auto cparam = GattServiceProviderAdvertisingParameters();
+            cparam.IsDiscoverable(true);
+            provider.StartAdvertising(cparam);
+        }
+
+        void StopAdvertising() {
+            provider.StopAdvertising();
+        }
+
+};
+
+
+unique_ptr<BLEProvider> pywinble_provide(const wchar_t * uuid_str, map<string, map<string, py::handle>> characteristics) {
     USES_CONVERSION;
 
     GUID uuid;
-    IIDFromString(A2W(uuid_str), &uuid);
+    IIDFromString(uuid_str, &uuid);
 
     GattServiceProviderResult result = GattServiceProvider::CreateAsync(uuid).get();
 
     if (result.Error() != BluetoothError::Success)
         Py_RETURN_ERROR(PyExc_RuntimeError, "Bluetooth error");
 
-    auto serviceProvider = result.ServiceProvider();
-    PyObject *key, *value;
-    Py_ssize_t pos = 0;
+    auto ble = make_unique<BLEProvider>(result.ServiceProvider());
+    
+    for (auto item : characteristics) {
+        auto key = item.first;
+        auto value = item.second;
 
-    while (PyDict_Next(chardict, &pos, &key, &value)) {
-        if (!PyDict_Check(value) || !PyUnicode_Check(key)) {
+        if (key.empty()) {
             Py_RETURN_ERROR(PyExc_TypeError, "Invalid characteristic dict {uuid:{key:v},...}");
         }
 
-        char * key_str = PyUnicode_AsUTF8(key);
-
-        IIDFromString(A2W(key_str), &uuid);
+        IIDFromString(A2W(key.c_str()), &uuid);
         GattLocalCharacteristicParameters cParams;
 
-        PyObject *ckey, *cvalue;
-        Py_ssize_t cpos = 0;
+        for (auto item : value) {
+            auto ckey = item.first;
+            auto cvalue = item.second;
 
-        while (PyDict_Next(value, &cpos, &ckey, &cvalue)) {
-            char * ckey_str = PyUnicode_AsUTF8(key);
-            if (!ckey_str) {
+            if (ckey.empty()) {
                 Py_RETURN_ERROR(PyExc_TypeError, "Invalid characteristic dict {uuid:{key:v},...}");
             }
 
-            if (!strcmp(ckey_str, "flags")) {
-                cParams.CharacteristicProperties((GattCharacteristicProperties)PyLong_AsLong(cvalue));
-            } else if (!strcmp(ckey_str, "description")) {
-                char * cval_str = PyUnicode_AsUTF8(cvalue);
-                cParams.UserDescription(A2W(cval_str));
+            if (ckey == "flags") {
+                cParams.CharacteristicProperties((GattCharacteristicProperties)PyLong_AsLong(cvalue.ptr()));
+            } else if (ckey == "description") {
+                py::str cv = py::str(cvalue);
+                cParams.UserDescription(A2W(string(cv).c_str()));
             }
         }
 
-        serviceProvider.Service().CreateCharacteristicAsync(uuid, cParams);
+        auto result = ble->Service().CreateCharacteristicAsync(uuid, cParams).get();
+
+        if (result.Error() != BluetoothError::Success)
+            Py_RETURN_ERROR(PyExc_RuntimeError, "Bluetooth error");
     }
 
-    Py_RETURN_NONE;
+    return ble;
 }
 
 class cleanup_module {
@@ -265,40 +307,19 @@ class cleanup_module {
         }
     }
 };
-
 auto __guard = cleanup_module();
 
-static PyMethodDef pywinbleMethods[] = {
-    {"advertise", (PyCFunction) pywinble_advertise, METH_VARARGS|METH_KEYWORDS, PyDoc_STR("ble advertise")},
-    {"provide", (PyCFunction) pywinble_provide, METH_VARARGS|METH_KEYWORDS, PyDoc_STR("start gatt provider")},
-    {"info", (PyCFunction) pywinble_info, METH_NOARGS, PyDoc_STR("init ble")},
-    {NULL, NULL, 0, NULL},
-};
+PYBIND11_MODULE(pywinble, m) {
+    winrt_ok();
 
-#if PY_MAJOR_VERSION >= 3
-    static struct PyModuleDef pywinbleDef = {
-        PyModuleDef_HEAD_INIT,
-        "pywinble",
-        NULL,
-        -1,
-        pywinbleMethods,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-    };
-	PyMODINIT_FUNC PyInit_pywinble(void) {
-        PyEval_InitThreads();
-        if (!winrt_ok())
-            return NULL;
-		return PyModule_Create(&pywinbleDef);
-	}
-#else
-	PyMODINIT_FUNC initpywinble(void)
-	{
-        PyEval_InitThreads();
-        if (!winrt_ok())
-            return;
-		(void) Py_InitModule("pywinble", pywinbleMethods);
-	}
-#endif
+    py::class_<BLEProvider>(m, "BLEProvider")
+        .def_property_readonly("uuid", &BLEProvider::getUUID)
+        .def("start", &BLEProvider::StartAdvertising)
+        .def("stop", &BLEProvider::StopAdvertising);
+
+    m.def("advertise", pywinble_advertise);
+
+    m.def("provide", pywinble_provide);
+
+    m.def("info", pywinble_info);
+}
