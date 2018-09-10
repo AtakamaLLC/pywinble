@@ -324,24 +324,24 @@ class BLEWatcher {
 
         }
 
-        void onAdded(const DeviceWatcher &watcher, const DeviceInformation &devinfo) {i
-            onCb("added", devinfo)
+        void onAdded(const DeviceWatcher &watcher, const DeviceInformation &devinfo) {
+            onCb("added", devinfo);
         }
 
         void onUpdated(const DeviceWatcher &watcher, const DeviceInformation &devinfo) {
-            onCb("updated", devinfo)
+            onCb("updated", devinfo);
         }
 
         void onRemoved(const DeviceWatcher &watcher, const DeviceInformation &devinfo) {
-            onCb("removed", devinfo)
+            onCb("removed", devinfo);
         }
 
         void onEnumerationCompleted(const DeviceWatcher &watcher, const DeviceInformation &devinfo) {
-            onCb("completed", devinfo)
+            onCb("completed", devinfo);
         }
 
         void onStopped(const DeviceWatcher &watcher, const DeviceInformation &devinfo) {
-            onCb("stopped", devinfo)
+            onCb("stopped", devinfo);
         }
     
         void start() {
@@ -352,7 +352,7 @@ class BLEWatcher {
         }
 
         ~BLEWatcher() {
-            watcher.St top();
+            watcher.Stop();
         }
 };
 
