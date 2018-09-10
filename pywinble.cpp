@@ -16,6 +16,7 @@ namespace py = pybind11;
 #include "winrt/Windows.Foundation.h"
 #include "winrt/Windows.Storage.Streams.h"
 #include "winrt/Windows.Devices.Bluetooth.h"
+#include "winrt/Windows.Devices.Enumeration.h"
 #include "winrt/Windows.Devices.Bluetooth.Advertisement.h"
 #include "winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h"
 
@@ -26,6 +27,7 @@ using namespace winrt::Windows::Devices;
 using namespace winrt::Windows::Storage::Streams;
 using namespace winrt::Windows::Devices::Bluetooth;
 using namespace winrt::Windows::Devices::Bluetooth::GenericAttributeProfile;
+using namespace winrt::Windows::Devices::Enumeration;
 
 
 // ################ GENERIC WINRT
@@ -299,6 +301,58 @@ unique_ptr<BLEProvider> pywinble_provide(const wchar_t * uuid_str, map<string, m
     return ble;
 }
 
+typedef function< void(string, map<string, map<string, py::handle > >) > *watch_cb_type;
+
+class BLEWatcher {
+    public:
+        DeviceWatcher watcher;
+        watch_cb_type callback;
+
+        BLEWatcher(std::vector<std::string> props,  watch_cb_type callback) : watcher(
+            DeviceInformation::CreateWatcher(
+                    BluetoothLEDevice::GetDeviceSelectorFromPairingState(false),
+                    props,
+                    DeviceInformationKind::AssociationEndpoint)) {
+            watcher.Added(bind(&BLEWatcher::onAdded, this));
+            watcher.Removed(bind(&BLEWatcher::onRemoved, this));
+            watcher.Updated(bind(&BLEWatcher::onUpdated, this));
+            watcher.EnumerationCompleted(bind(&BLEWatcher::onEnumerationCompleted, this));
+            watcher.Stopped(bind(&BLEWatcher::onStopped, this));
+        }
+
+        void onAdded(const DeviceWatcher &watcher, const DeviceInformation &devinfo) {
+        }
+
+        void onUpdated(const DeviceWatcher &watcher, const DeviceInformation &devinfo) {
+        }
+
+        void onRemoved(const DeviceWatcher &watcher, const DeviceInformation &devinfo) {
+        }
+
+        void onEnumerationCompleted(const DeviceWatcher &watcher, const DeviceInformation &devinfo) {
+        }
+
+        void onStopped(const DeviceWatcher &watcher, const DeviceInformation &devinfo) {
+        }
+    
+        void start() {
+            watcher.Start();
+        }
+        void stop() {
+            watcher.Stop();
+        }
+
+        ~BLEWatcher() {
+            watcher.Stop();
+        }
+};
+
+
+unique_ptr<BLEWatcher> pywinble_watch(vector<string> props, watch_cb_type callback) {
+    auto ble = make_unique<BLEWatcher>(props, callback);
+    return ble;
+}
+
 class cleanup_module {
     public:
     ~cleanup_module() {
@@ -317,9 +371,15 @@ PYBIND11_MODULE(pywinble, m) {
         .def("start", &BLEProvider::StartAdvertising)
         .def("stop", &BLEProvider::StopAdvertising);
 
+    py::class_<BLEWatcher>(m, "BLEWatcher")
+        .def("start", &BLEWatcher::start)
+        .def("stop", &BLEWatcher::stop);
+
     m.def("advertise", pywinble_advertise);
 
     m.def("provide", pywinble_provide);
 
     m.def("info", pywinble_info);
+
+    m.def("watch", pywinble_watch);
 }
